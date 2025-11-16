@@ -1,0 +1,169 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include "HX711.h"
+#include <Servo.h>
+
+// --- I2C LCD (16x2) ---
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --- HX711 Pins ---
+#define LOADCELL_DOUT_PIN 14  // A0
+#define LOADCELL_SCK_PIN  15  // A1
+
+// --- Other Pins ---
+const int sensorPin = 7;      // Inductive NPN sensor (LOW = metal)
+const int buzzerPin = 8;      // Active buzzer
+const int servoPin  = 9;      // Servo for reject
+
+HX711 scale;
+Servo gateServo;
+
+// --- Calibration ---
+float calibration_factor = -7050.0;  // Replace with your actual calibration factor
+
+// --- Detection Settings ---
+const float weightThreshold = 20.0;  // Sudden increase = item inserted
+const unsigned long detectionWindow = 1500;
+const unsigned long cooldownTime = 1500;
+
+unsigned long cooldownStart = 0;
+bool inCooldown = false;
+bool itemProcessing = false;
+
+float lastWeight = 0.0;
+unsigned long itemDetectTime = 0;
+
+void setup() {
+  Serial.begin(9600);
+
+  // LCD Setup
+  lcd.init();
+  lcd.backlight();
+  showIdleScreen();
+
+  // HX711 Setup
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(calibration_factor);
+  scale.tare();
+
+  pinMode(sensorPin, INPUT_PULLUP); 
+  pinMode(buzzerPin, OUTPUT);
+
+  gateServo.attach(servoPin);
+  gateServo.write(0);  // Neutral
+
+  delay(500);
+}
+
+void loop() {
+
+  unsigned long now = millis();
+
+  // Cooldown return to idle
+  if (inCooldown && (now - cooldownStart >= cooldownTime)) {
+    inCooldown = false;
+    showIdleScreen();
+  }
+
+  float weight = 0.0;
+  if (scale.is_ready()) weight = scale.get_units(5);
+
+  // Detect if something was inserted
+  if (!itemProcessing && !inCooldown) {
+    if (weight - lastWeight > weightThreshold) {
+      itemProcessing = true;
+      itemDetectTime = now;
+
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Detecting...");
+    }
+  }
+
+  // Classification
+  if (itemProcessing) {
+    int metal = digitalRead(sensorPin);  // LOW = metal detected
+
+    if (metal == LOW) {
+      // ACCEPT
+      itemProcessing = false;
+      handleAccept();
+    }
+    else if (now - itemDetectTime > detectionWindow) {
+      // REJECT
+      itemProcessing = false;
+      handleReject();
+    }
+  }
+
+  lastWeight = weight;
+  delay(80);
+}
+
+// --- ACCEPT LOGIC ---
+void handleAccept() {
+  beep(100);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("ACCEPT");
+  lcd.setCursor(0,1);
+  lcd.print("Loading...");
+
+  delay(10000);  // 10 seconds for item to fall
+
+  float w = scale.get_units(10);
+  if (w < 0) w = 0;
+
+  // Limit 3kg max
+  if (w > 3000) w = 3000;
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Weight: ");
+  lcd.print(w, 1);
+  lcd.print("g");
+
+  lcd.setCursor(0,1);
+  lcd.print("Volume: ");
+  lcd.print(w, 1);
+  lcd.print("ml");
+
+  cooldownStart = millis();
+  inCooldown = true;
+}
+
+// --- REJECT LOGIC ---
+void handleReject() {
+  beep(200);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Sorry,");
+  lcd.setCursor(0,1);
+  lcd.print("wrong item!");
+
+  // Servo pushes the item out
+  gateServo.write(90);
+  delay(700);
+  gateServo.write(0);
+
+  cooldownStart = millis();
+  inCooldown = true;
+}
+
+// --- BEEP ---
+void beep(unsigned int ms) {
+  digitalWrite(buzzerPin, HIGH);
+  delay(ms);
+  digitalWrite(buzzerPin, LOW);
+}
+
+// --- IDLE SCREEN ---
+void showIdleScreen() {
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Eco-R3fill");
+  lcd.setCursor(0,1);
+  lcd.print("Pls, insert item");
+}
